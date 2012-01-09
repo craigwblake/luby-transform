@@ -4,6 +4,17 @@ import scala.annotation.tailrec
 import scala.collection.immutable.Stream._
 import scala.util.Random
 
+/**
+ * Implementation of the Luby Transform Fountain Code.
+ *
+ * The algorithm is as follows for each block in the input file
+ *
+ * 1. Choose a psuedo-random number, d, between 1 and k (number of total blocks in file/stream)
+ * 2. Choose d blocks psuedo-randomly (seeded with d) from the file and combine them using xor
+ * 3. Transmit encoded blocks aling with seed for the psuedo-random number
+ *
+ * Note that d should follow the Robust Soliton Distribution in order to optimize transmission size
+ */
 class LubyTransform (val seed: Int = Random.nextInt()) {
     import LubyTransform._
 
