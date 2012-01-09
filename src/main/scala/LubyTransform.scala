@@ -9,15 +9,24 @@ class LubyTransform (val seed: Int = Random.nextInt()) {
 
     val random = new Random(seed)
 
+    /**
+     * Stream of random number used as a distribution for encoding.
+     */
     val distribution: Stream[Int] = cons(random.nextInt(5) + 1, distribution)
 
-    def transform (data: Stream[Array[Byte]]): Stream[Block] = transformWithInts(data, distribution)
+    /**
+     * Transforms a stream of input data into a stream of encoded blocks using the seeded distribution function.
+     */
+    def transform (data: Stream[Array[Byte]]): Stream[Block] = transformWithDistribution(data, distribution)
 
-    private def transformWithInts (input: Stream[Array[Byte]], ints: Stream[Int]): Stream[Block] = input match {
+    /**
+     * Transforms a stream of input data into a stream of encoded blocks using the provided distribution function.
+     */
+    private def transformWithDistribution (input: Stream[Array[Byte]], ints: Stream[Int]): Stream[Block] = input match {
         case Empty => Empty
         case _ =>
             val (xor, remainder) = combine(input.head, input.tail, ints.head)
-            cons(Block(seed, xor), transformWithInts(remainder, ints.tail))
+            cons(Block(seed, xor), transformWithDistribution(remainder, ints.tail))
     }
 }
 
@@ -27,13 +36,10 @@ object LubyTransform {
      * Combines an arbitrary number of equal length byte arrays by XOR
      */
     @tailrec
-    def combine (head: Array[Byte], tail: Stream[Array[Byte]], remaining: Int): (Array[Byte], Stream[Array[Byte]]) = {
-        println("combining " + remaining + " blocks")
-        remaining match {
-            case 0 => (head, tail)
-            case _ if tail == Empty => (head, tail)
-            case _ => combine(xor(head, tail.head), tail.tail, remaining - 1)
-        }
+    def combine (head: Array[Byte], tail: Stream[Array[Byte]], remaining: Int): (Array[Byte], Stream[Array[Byte]]) = remaining match {
+        case 0 => (head, tail)
+        case _ if tail == Empty => (head, tail)
+        case _ => combine(xor(head, tail.head), tail.tail, remaining - 1)
     }
 
     /**
