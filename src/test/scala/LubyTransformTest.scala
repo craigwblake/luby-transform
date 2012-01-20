@@ -1,30 +1,86 @@
 package algorithms
 
 import com.github.tototoshi.base64.Base64.encode
+import java.io.File
+import java.nio.ByteBuffer._
 import org.scalatest.FlatSpec
 import org.scalatest.matchers.ShouldMatchers
 import scala.annotation.tailrec
 import scala.collection.immutable.Stream._
+import scala.collection._
+import scala.io.Source
 
 class LubyTransformSpec extends FlatSpec with ShouldMatchers {
 
     implicit def string2bytes (v: String) = v.getBytes("ASCII")
 
-    "A distribution" should "return pseudo-random integers between 1 and bound inclusively" in {
-        val stream = LubyTransform.distribution(1, 5)
-        stream.head should equal (3)
-        stream.tail.head should equal (4)
-        stream.tail.tail.head should equal (1)
-
-        @tailrec
-        def testBounds (stream: Stream[Int], remaining: Int = 1000): Unit = {
-            stream.head should be >= (0)
-            stream.head should be < (5)
-            testBounds(stream.tail, remaining - 1)
-        }
+    "A byte buffer sequence" should "calculate the number of chunks in a buffer" in {
+        val buffer = allocate(4096)
+        ByteBufferSeq(buffer, 1024).size should equal (4)
+        ByteBufferSeq(buffer, 1000).size should equal (5)
     }
 
-	"A Luby Transform" should "XOR two byte arrays into a block" in {
+    it should "iterate all chunks in the buffer" in {
+        val buffer = allocate(4)
+        buffer.put(0, 'a')
+        buffer.put(1, 'b')
+        buffer.put(2, 'c')
+        buffer.put(3, 'd')
+
+        val iterator = ByteBufferSeq(buffer, 1).iterator
+        iterator.hasNext should equal (true)
+        iterator.next()(0) should equal ('a')
+        iterator.hasNext should equal (true)
+        iterator.next()(0) should equal ('b')
+        iterator.hasNext should equal (true)
+        iterator.next()(0) should equal ('c')
+        iterator.hasNext should equal (true)
+        iterator.next()(0) should equal ('d')
+        iterator.hasNext should equal (false)
+    }
+
+    it should "iterate variable length buffers" in {
+        val buffer = allocate(1024)
+        val iterator = ByteBufferSeq(buffer, 500).iterator
+        iterator.next.length should equal (500)
+        iterator.next.length should equal (500)
+        iterator.next.length should equal (24)
+    }
+
+    "A distribution" should "return pseudo-random integers between 0 (inclusive) and bound (exclusive)" in {
+        val distribution = LubyTransform.distribution(1, 5)
+        distribution.head should equal (0)
+        distribution.tail.head should equal (3)
+        distribution.tail.tail.head should equal (2)
+
+        @tailrec
+        def testBounds (distribution: Stream[Int], remaining: Int = 1000): Unit = remaining match {
+            case 0 =>
+            case _ =>
+                distribution.head should be >= (0)
+                distribution.head should be < (5)
+                testBounds(distribution.tail, remaining - 1)
+        }
+        testBounds(distribution)
+    }
+
+    it should "return the entire set of possibilities over time" in {
+        val distribution = LubyTransform.distribution(1, 20)
+        val numerals = 0 until 20
+        def waitForAll (distribution: Stream[Int], numerals: List[Int]): Unit = numerals match {
+            case Nil =>
+            case x => waitForAll(distribution.tail, numerals - distribution.head)
+        }
+        waitForAll(distribution, numerals.toList)
+    }
+
+	"A Luby Transform" should "calculate the chink size" in {
+        LubyTransform.calculateChunkCount(10, 10) should equal (1)
+        LubyTransform.calculateChunkCount(10, 1) should equal (10)
+        LubyTransform.calculateChunkCount(113, 5) should equal (23)
+	}
+
+    it should "XOR two byte arrays into a block" in {
         val xor = LubyTransform.xor("abcd", "efgh")
 
         xor(0) ^ 'a' should equal ('e')
@@ -107,15 +163,10 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
     }
 
     it should "consume a stream of byte arrays and create a stream of blocks" in {
-        val one = "abcd"
-        val two = "efgh"
-        val three = "ijkl"
-        val four = "mnop"
+        val input: Array[Byte] = "abcdefghijklmnop"
 
-        val input = List[Array[Byte]](one, two, three, four)
-
-        val fountain = new LubyTransform(2)
-        val output: Stream[Block] = fountain.transform(input)
+        val fountain = new LubyTransform(wrap(input), 14, 4)
+        val output: Stream[Block] = fountain.transform
         
         output should not equal (Empty)
 
@@ -123,27 +174,23 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         val second = output.tail.head
 
         first.data.length should equal (4)
-        first.data(0) ^ 'i' ^ 'a' should equal ('m')
-        first.data(1) ^ 'j' ^ 'b' should equal ('n')
-        first.data(2) ^ 'k' ^ 'c' should equal ('o')
-        first.data(3) ^ 'l' ^ 'd' should equal ('p')
+        first.data(0) ^ 'e' ^ 'a' ^ 'i' should equal ('m')
+        first.data(1) ^ 'f' ^ 'b' ^ 'j' should equal ('n')
+        first.data(2) ^ 'g' ^ 'c' ^ 'k' should equal ('o')
+        first.data(3) ^ 'h' ^ 'd' ^ 'l' should equal ('p')
 
         second.data.length should equal (4)
-        second.data(0) ^ 'i' should equal ('e')
-        second.data(1) ^ 'j' should equal ('f')
-        second.data(2) ^ 'k' should equal ('g')
-        second.data(3) ^ 'l' should equal ('h')
+        second.data(0) ^ 'm' ^ 'e' should equal ('i')
+        second.data(1) ^ 'n' ^ 'f' should equal ('j')
+        second.data(2) ^ 'o' ^ 'g' should equal ('k')
+        second.data(3) ^ 'p' ^ 'h' should equal ('l')
     }
 
     it should "consume a stream of disparately sized byte arrays and create a stream of blocks" in {
-        val one = "abcd"
-        val two = "efgh"
-        val three = "ijk"
+        val input: Array[Byte] = "abcdefghijk"
 
-        val input = List[Array[Byte]](one, two, three)
-
-        val fountain = new LubyTransform(2)
-        val output: Stream[Block] = fountain.transform(input)
+        val fountain = new LubyTransform(wrap(input), 14, 4)
+        val output: Stream[Block] = fountain.transform
         
         output should not equal (Empty)
 
@@ -168,5 +215,21 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         third.data(1) ^ 'j' ^ 'b' should equal ('f')
         third.data(2) ^ 'k' ^ 'c' should equal ('g')
         third.data(3) ^ 'd' should equal ('h')
+    }
+
+    it should "generate a decodable chunk stream from a file" in {
+
+        val source = new File(getClass.getClassLoader.getResource("test.txt").toURI)
+        source.length should be (113)
+
+        val destination = File.createTempFile("luby-", ".txt")
+        
+        import LubyTransform.file2buffer
+        val transformer = new LubyTransform(source, 15, 5)
+        val stream = transformer.transform
+        LubyTransform.read(stream, destination)
+        
+        val result = Source.fromFile(destination).mkString
+        result should be ("When the people fear their government, there is tyranny; when the government fears the people, there is liberty.\n")
     }
 }
