@@ -7,6 +7,7 @@ import org.scalatest.FlatSpec
 import org.scalatest.matchers.ShouldMatchers
 import scala.annotation.tailrec
 import scala.collection.immutable.Stream._
+import scala.collection.mutable.IndexedSeq
 import scala.collection._
 import scala.io.Source
 
@@ -162,6 +163,67 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         xor(3) ^ 'h' should equal ('d')
     }
 
+    it should "XOR a particular set of chunks" in {
+        val one = "rnmen"
+        val two = "there"
+        val combined = "\034\032\101\027\017"
+        combined.length should equal (5)
+
+        val result = "nt, t"
+
+        val xor = LubyTransform.combine(List[Array[Byte]](one, two, combined)).get
+
+        xor.length should equal (5)
+
+        xor(0) should equal ('n')
+        xor(1) should equal ('t')
+        xor(2) should equal (',')
+        xor(3) should equal (' ')
+        xor(4) should equal ('t')
+    }
+
+    it should "decode a chunk from a prepared block" in {
+        val one = "abcd"
+        val two = "efgh"
+        val three = "ijk"
+
+        val xor = LubyTransform.combine(List[Array[Byte]](one, two, three)).get
+        val block = PreparedBlock(Set(0, 1, 2), LubyTransform.combine(Seq(one, two, three)).get)
+        val available = Set(1, 2)
+        val buffer = IndexedSeq[Array[Byte]]("    ", two, three)
+
+        new String(buffer(0)) should be ("    ")
+
+        val decoded = LubyTransform.decodeChunk(buffer, block, available)
+
+        decoded.get should be (0)
+
+        new String(buffer(0)) should be (one)
+        new String(buffer(1)) should be (two)
+        new String(buffer(2)) should be (three)
+    }
+
+    it should "not decode a chunk from a prepared block if there are not enough available chunks" in {
+        val one = "abcd"
+        val two = "efgh"
+        val three = "ijk"
+
+        val xor = LubyTransform.combine(List[Array[Byte]](one, two, three)).get
+        val block = PreparedBlock(Set(0, 1, 2), LubyTransform.combine(Seq(one, two, three)).get)
+        val available = Set(1)
+        val buffer = IndexedSeq[Array[Byte]]("    ", two, "    ")
+
+        new String(buffer(0)) should be ("    ")
+
+        val decoded = LubyTransform.decodeChunk(buffer, block, available)
+
+        decoded should be (None)
+
+        new String(buffer(0)) should be ("    ")
+        new String(buffer(1)) should be (two)
+        new String(buffer(2)) should be ("    ")
+    }
+
     it should "consume a stream of byte arrays and create a stream of blocks" in {
         val input: Array[Byte] = "abcdefghijklmnop"
 
@@ -218,7 +280,6 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
     }
 
     it should "generate a decodable chunk stream from a file" in {
-
         val source = new File(getClass.getClassLoader.getResource("test.txt").toURI)
         source.length should be (113)
 
