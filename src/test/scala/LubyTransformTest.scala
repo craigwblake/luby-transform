@@ -1,8 +1,10 @@
 package algorithms
 
 import com.github.tototoshi.base64.Base64.encode
-import java.io.File
+import java.io._
 import java.nio.ByteBuffer._
+import java.nio.channels.Channels._
+import java.util.zip._
 import org.scalatest.FlatSpec
 import org.scalatest.matchers.ShouldMatchers
 import scala.annotation.tailrec
@@ -14,6 +16,11 @@ import scala.io.Source
 class LubyTransformSpec extends FlatSpec with ShouldMatchers {
 
     implicit def string2bytes (v: String) = v.getBytes("ASCII")
+
+    "test" should "test" in {
+        val list = LubyTransform.select2(100, scala.util.Random.nextInt, Nil)
+        //list.map(x=>println(x))
+    }
 
     "A byte buffer sequence" should "calculate the number of chunks in a buffer" in {
         val buffer = allocate(4096)
@@ -163,33 +170,14 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         xor(3) ^ 'h' should equal ('d')
     }
 
-    it should "XOR a particular set of chunks" in {
-        val one = "rnmen"
-        val two = "there"
-        val combined = "\034\032\101\027\017"
-        combined.length should equal (5)
-
-        val result = "nt, t"
-
-        val xor = LubyTransform.combine(List[Array[Byte]](one, two, combined)).get
-
-        xor.length should equal (5)
-
-        xor(0) should equal ('n')
-        xor(1) should equal ('t')
-        xor(2) should equal (',')
-        xor(3) should equal (' ')
-        xor(4) should equal ('t')
-    }
-
     it should "decode a chunk from a prepared block" in {
         val one = "abcd"
         val two = "efgh"
         val three = "ijk"
 
         val xor = LubyTransform.combine(List[Array[Byte]](one, two, three)).get
-        val block = PreparedBlock(Set(0, 1, 2), LubyTransform.combine(Seq(one, two, three)).get)
-        val available = Set(1, 2)
+        val block = PreparedBlock(0 :: 1 :: 2 :: Nil, LubyTransform.combine(Seq(one, two, three)).get)
+        val available = 1 :: 2 :: Nil
         val buffer = IndexedSeq[Array[Byte]]("    ", two, three)
 
         new String(buffer(0)) should be ("    ")
@@ -209,8 +197,8 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         val three = "ijk"
 
         val xor = LubyTransform.combine(List[Array[Byte]](one, two, three)).get
-        val block = PreparedBlock(Set(0, 1, 2), LubyTransform.combine(Seq(one, two, three)).get)
-        val available = Set(1)
+        val block = PreparedBlock(0 :: 1 :: 2 :: Nil, LubyTransform.combine(Seq(one, two, three)).get)
+        val available = 1 :: Nil
         val buffer = IndexedSeq[Array[Byte]]("    ", two, "    ")
 
         new String(buffer(0)) should be ("    ")
@@ -225,7 +213,7 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
     }
 
     it should "consume a stream of byte arrays and create a stream of blocks" in {
-        val input: Array[Byte] = "abcdefghijklmnop"
+        val input: Array[Byte] = "abcdefghijklmnop".getBytes("ASCII")
 
         val fountain = new LubyTransform(wrap(input), 14, 4)
         val output: Stream[Block] = fountain.transform
@@ -283,14 +271,54 @@ class LubyTransformSpec extends FlatSpec with ShouldMatchers {
         val source = new File(getClass.getClassLoader.getResource("test.txt").toURI)
         source.length should be (113)
 
-        val destination = File.createTempFile("luby-", ".txt")
+        val destination = File.createTempFile("destination-", ".txt")
         
         import LubyTransform.file2buffer
-        val transformer = new LubyTransform(source, 15, 5)
+        val transformer = new LubyTransform(source, chunk = 5)
         val stream = transformer.transform
-        LubyTransform.read(stream, destination)
+        val read = LubyTransform.write(stream, destination)
+        val ideal = LubyTransform.calculateChunkCount(stream.head.size, transformer.chunk)
+        println("read " + read + " chunks (" + ideal + " ideal)")
         
         val result = Source.fromFile(destination).mkString
         result should be ("When the people fear their government, there is tyranny; when the government fears the people, there is liberty.\n")
+
+        compare(new FileInputStream(source), new FileInputStream(destination))
+    }
+
+    it should "copy a mid-sized binary" in {
+        val url = getClass.getClassLoader.getResource("big-test.gz")
+        val source = File.createTempFile("source-", ".txt")
+        new FileOutputStream(source).getChannel.transferFrom(newChannel(new GZIPInputStream(url.openStream)), 0, Long.MaxValue)
+
+        source.length should be (52428800)
+
+        val destination = File.createTempFile("destination-", ".txt")
+        
+        import LubyTransform.file2buffer
+        val transformer = new LubyTransform(source)
+        val stream = transformer.transform
+
+        val chunks = LubyTransform.write(stream, destination)
+
+        val ideal = LubyTransform.calculateChunkCount(stream.head.size, transformer.chunk)
+        println("read " + chunks + " chunks (" + ideal + " ideal)")
+
+        compare(new FileInputStream(source), new FileInputStream(destination))
+    }
+
+    def compare (is1: InputStream, is2: InputStream) = {
+        val buffer1 = new Array[Byte](128)
+        val buffer2 = new Array[Byte](128)
+
+        var index = 0
+        var read = 0
+        do {
+            read = is1.read(buffer1, index, buffer1.length)
+            is2.read(buffer2, index, buffer2.length) should equal (read)
+
+            buffer1 should equal (buffer2)
+            index += read
+        } while (read != 0)
     }
 }
