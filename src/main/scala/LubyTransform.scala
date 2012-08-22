@@ -74,7 +74,6 @@ object LubyTransform {
             val block = source.head
             val degrees = distribution(block.seed, destination.length)
             val degree = degrees.head + 1
-            //println("degree: " + degree)
             val selection = select(degree, distribution(degrees.tail.head, destination.length))
             val partition = selection.partition(x => available.contains(x))
 
@@ -181,7 +180,6 @@ object LubyTransform {
     def select (count: Int, random: Stream[Int], used: List[Int] = List()): List[Int] = count match {
         case 0 => Nil
         case _ =>
-            //println("select count: " + count)
             //val next = random.filter(!used.contains(_)).head
             val next = random.head
             next :: select(count - 1, random.tail, next :: used)
