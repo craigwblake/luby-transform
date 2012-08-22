@@ -7,26 +7,25 @@ import Int._
 import scala.annotation.tailrec
 import scala.collection._
 import scala.collection.immutable.Stream._
-import scala.collection.immutable.TreeSet
 import scala.collection.mutable.IndexedSeq
 import scala.util.Random
 
 case class Block (val seed: Int, val size: Int, val chunk: Int, val data: Array[Byte])
 
-case class PreparedBlock (val chunks: Set[Int], val data: Array[Byte])
+case class PreparedBlock (val chunks: List[Int], val data: Array[Byte])
 
 /**
- * Implementation of a Luby Transform rateless error correcting code (fountain code).
+ * Implementation of a Luby Transform fountain code.
  *
  * The algorithm is as follows for each block in the input file
  *
- * 1. Choose a psuedo-random number, d, between 1 and k (number of total blocks in file/stream)
- * 2. Choose d blocks psuedo-randomly (seeded with d) from the file and combine them using xor
+ * 1. Choose a psuedo-random number, d, between 1 and k (number of total blocks in file)
+ * 2. Choose d blocks psuedo-randomly (seeded with d) from the file and xor them
  * 3. Transmit encoded blocks along with seed for the psuedo-random number
  *
- * Note that d should follow the Robust Soliton Distribution for near optimal transmission size
+ * Note that d should follow the Robust Soliton Distribution for optimal transmission size
  */
-class LubyTransform (val data: ByteBuffer, val seed: Int = Random.nextInt(), val chunk: Int = 1024) {
+class LubyTransform (val data: ByteBuffer, val seed: Int = Random.nextInt(), val chunk: Int = 2048) {
     import LubyTransform._
 
     val chunks = ByteBufferSeq(data, chunk)
@@ -45,7 +44,6 @@ class LubyTransform (val data: ByteBuffer, val seed: Int = Random.nextInt(), val
             val degrees = distribution(seeds.head, chunks.length)
             val selection = select(degrees.head + 1, distribution(degrees.tail.head, chunks.length))
             val blocks = selection.map(x => chunks(x))
-            //for (i <- selection) println("encoded chunk " + i + ": " + new String(chunks(i)))
 
             combine(blocks.toSeq) match {
                 case None => Empty
@@ -58,86 +56,81 @@ object LubyTransform {
 
     implicit def file2buffer (file: File): ByteBuffer = new FileInputStream(file).getChannel.map(READ_ONLY, 0, file.length)
 
-    implicit object O extends Ordering[Int] { def compare(x: Int, y: Int): Int = x - y }
-
-    def read (source: Stream[Block], destination: File): Unit = {
+    /**
+     * Writes a data block stream into the given file and returns the total count of read chunks.
+     */
+    def write (source: Stream[Block], destination: File): Long = {
         val mapping = new RandomAccessFile(destination, "rw").getChannel.map(READ_WRITE, 0, source.head.size)
         val buffer = ByteBufferSeq(mapping, source.head.chunk)
         decode(buffer, source)
     }
 
+    /**
+     * Writes a data block stream into the given buffer.
+     */
     @tailrec
-    def decode (destination: ByteBufferSeq, source: Stream[Block], available: Set[Int] = Set[Int](), waiting: Set[PreparedBlock] = Set(), read: Int = 0): Unit = available.size match {
+    def decode (destination: ByteBufferSeq, source: Stream[Block], available: List[Int] = List[Int](), waiting: List[PreparedBlock] = List(), iterations: Long = 0L): Long = available.size match {
         case read if read < destination.length =>
             val block = source.head
             val degrees = distribution(block.seed, destination.length)
             val degree = degrees.head + 1
+            //println("degree: " + degree)
             val selection = select(degree, distribution(degrees.tail.head, destination.length))
             val partition = selection.partition(x => available.contains(x))
 
-            //println("read " + read + ", available " + (TreeSet[Int]() ++ available).mkString(","))
-            (partition._1.toSeq, partition._2.toSeq) match {
-                case (_, Seq()) => // Already available, throw it away
-                    //println("skipping chunks " + selection.mkString(",") + " - already available")
-                    decode(destination, source.tail, available, waiting, read)
+            (partition._1, partition._2) match {
+                case (_, Nil) => // Already available, throw it away
+                    decode(destination, source.tail, available, waiting, iterations + 1)
                   
-                case (ready, Seq(x)) => // One left, we can decode!
+                case (ready, x :: Nil) => // One left, we can decode!
                     decodeChunk(destination, PreparedBlock(selection, block.data), available)
-                    val result = decodeSaved(destination, available + x, waiting)
-                    decode(destination, source.tail, result._1, result._2, read + 1)
+                    val result = decodeSaved(destination, x :: available, waiting)
+                    decode(destination, source.tail, result._1, result._2, iterations + 1)
                 
-                case (_, seq) => // Too many unknowns
-                    //println("not ready to decode chunks " + selection.mkString(","))
-                    decode(destination, source.tail, available, waiting + PreparedBlock(seq.toSet, block.data), read)
+                case (ready, unready) => // Too many unknowns
+                    decode(destination, source.tail, available, PreparedBlock(ready ++ unready, block.data) :: waiting, iterations + 1)
             }
 
-        case _ => // Finished!
+        case _ => iterations // Finished!
     }
 
+    /**
+     * Finds and decodes deferred blocks, recursing the list again each time a new block is decoded.
+     */
     @tailrec
-    def decodeSaved (destination: ByteBufferSeq, available: Set[Int], unchecked: Set[PreparedBlock]): (Set[Int], Set[PreparedBlock]) = decodeSavedPass(destination, available, unchecked) match {
+    def decodeSaved (destination: ByteBufferSeq, available: List[Int], unchecked: List[PreparedBlock]): (List[Int], List[PreparedBlock]) = decodeSavedPass(destination, available, unchecked) match {
         case (available, waiting, true) => (available, waiting)
         case (available, waiting, false) => decodeSaved(destination, available, waiting)
     }
 
+    /**
+     * A single pass through the deferred blocks to decode any that are now available.
+     */
     @tailrec
-    def decodeSavedPass (destination: ByteBufferSeq, available: Set[Int], unchecked: Set[PreparedBlock], checked: Set[PreparedBlock] = Set()): (Set[Int], Set[PreparedBlock], Boolean) = unchecked.size match {
+    def decodeSavedPass (destination: ByteBufferSeq, available: List[Int], unchecked: List[PreparedBlock], checked: List[PreparedBlock] = List()): (List[Int], List[PreparedBlock], Boolean) = unchecked.size match {
         case 0 => (available, checked, true)
         case _ =>
             val block = unchecked.head
             decodeChunk(destination, block, available) match {
-                case Some(index) => (available + index, checked ++ unchecked.tail, false)
-                case None => decodeSavedPass(destination, available, unchecked.tail, checked + block)
+                case Some(index) => (index :: available, checked ++ unchecked.tail, false)
+                case None => decodeSavedPass(destination, available, unchecked.tail, block :: checked)
             }
     }
 
-    def decodeChunk (destination: IndexedSeq[Array[Byte]], block: PreparedBlock, available: Set[Int]): Option[Int] = {
+    /**
+     * Decodes a single chunk into the destination.
+     */
+    def decodeChunk (destination: IndexedSeq[Array[Byte]], block: PreparedBlock, available: List[Int]): Option[Int] = {
         val intersection = block.chunks.intersect(available)
         val remaining = block.chunks -- intersection
-        //println("intersection: " + intersection.mkString(","))
-        //println("remaining: " + remaining.mkString(","))
 
         remaining.size match {
             case 1 =>
                 val data = intersection.map(destination(_)).toSeq match {
                     case Nil => Some(block.data)
-                    case chunks =>
-                        combine(chunks :+ block.data)
-                }
-                println("decoding chunks " + remaining.head + ": " + new String(data.get))
-                if (remaining.head == 7) {
-                    println("\nfound 7")
-                    println("other parts: " + intersection.mkString(","))
-                    val chunk14 = destination(14)
-                    println("bytes for chunk # 14: 	\\" + chunk14(0).toInt + " 	\\" + chunk14(1).toInt + " 	\\" + chunk14(2).toInt + " 	\\" + chunk14(3).toInt + " 	\\" + chunk14(4).toInt + ": " + new String(chunk14))
-                    val chunk19 = destination(19)
-                    println("bytes for chunk # 19: 	\\" + chunk19(0).toInt + " 	\\" + chunk19(1).toInt + " 	\\" + chunk19(2).toInt + " 	\\" + chunk19(3).toInt + " 	\\" + chunk19(4).toInt + ": " + new String(chunk19))
-                    println("bytes for this chunk: 	\\" + block.data(0).toInt + " 	\\" + block.data(1).toInt + " 	\\" + block.data(2).toInt + " 	\\" + block.data(3).toInt + " 	\\" + block.data(4).toInt)
-                    println("processed this chunk: 	\\" + data.get(0).toInt + " 	\\" + data.get(1).toInt + " 	\\" + data.get(2).toInt + " 	\\" + data.get(3).toInt + " 	\\" + data.get(4).toInt)
-                    println("\n")
+                    case chunks => combine(chunks :+ block.data)
                 }
                 destination.update(remaining.head, data.get)
-                println("line is: " + destination.map(x => new String(x)).mkString.trim)
                 Some(remaining.head)
             case _ => None
         }
@@ -165,15 +158,33 @@ object LubyTransform {
         }
     }
 
+    val Modulo = 87178291199L // prime
+    val Incrementor = 17180131327L // relative prime
+
+    def select2 (count: Int, random: Stream[Int]): List[Long] = select2(count, random.head, Nil)
+
+    // Implementation of non-repeating linear congruential pseudo-random generator
+    // TODO: Convert to stream to save memory
+    @tailrec
+    def select2 (count: Int, seed: Long, list: List[Long]): List[Long] = count match {
+        case 0 => list
+        case _ =>
+            val next = (seed + Incrementor) % Modulo
+            select2(count - 1, next, next :: list)
+    }
+
     /**
      * Selects a unique psuedo-random set of ints from the given stream. This function discards duplicates;
      * for this reason the count must not be higher than the range of the random number generator.
      */
-    def select (count: Int, random: Stream[Int], used: Set[Int] = Set()): SortedSet[Int] = count match {
-        case 0 => TreeSet()
+    //@tailrec
+    def select (count: Int, random: Stream[Int], used: List[Int] = List()): List[Int] = count match {
+        case 0 => Nil
         case _ =>
-            val next = random.filter(!used.contains(_)).head
-            select(count - 1, random.tail, used + next) + next
+            //println("select count: " + count)
+            //val next = random.filter(!used.contains(_)).head
+            val next = random.head
+            next :: select(count - 1, random.tail, next :: used)
     }
 
     /**
@@ -193,13 +204,22 @@ object LubyTransform {
     def sort (one: Array[Byte], two: Array[Byte]) = if (one.length >= two.length) (one, two) else (two, one)
 }
 
+/**
+ * Sequence view of a byte buffer in chunks.
+ */
 case class ByteBufferSeq (buffer: ByteBuffer, chunk: Int) extends IndexedSeq[Array[Byte]] {
     import LubyTransform._
 
     implicit def int2bigdecimal (v: Int) = BigDecimal(v)
     
+    /**
+     * Calculates the number of chunks in this view.
+     */
     override val length = calculateChunkCount(buffer.capacity, chunk)
 
+    /**
+     * Writes data to the chunk at the given index.
+     */
     override def update (index: Int, elem: Array[Byte]) = {
         val start = index * chunk
         val end = Math.min(start + elem.length, buffer.capacity)
@@ -209,6 +229,9 @@ case class ByteBufferSeq (buffer: ByteBuffer, chunk: Int) extends IndexedSeq[Arr
         buffer.put(elem, 0, end - start)
     }
 
+    /**
+     * Reads data from the chunk at the given index.
+     */
     override def apply (index: Int): Array[Byte] = {
         val start = index * chunk
         val end = Math.min(start + chunk, buffer.capacity)
