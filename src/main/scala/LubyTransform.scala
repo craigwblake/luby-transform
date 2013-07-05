@@ -121,7 +121,7 @@ object LubyTransform {
      */
     def decodeChunk (destination: IndexedSeq[Array[Byte]], block: PreparedBlock, available: List[Int]): Option[Int] = {
         val intersection = block.chunks.intersect(available)
-        val remaining = block.chunks -- intersection
+        val remaining = block.chunks filterNot (intersection contains)
 
         remaining.size match {
             case 1 =>
